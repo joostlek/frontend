@@ -19,6 +19,7 @@ import "../card-features/hui-lock-commands-card-feature";
 import "../card-features/hui-lock-open-door-card-feature";
 import "../card-features/hui-media-player-volume-slider-card-feature";
 import "../card-features/hui-numeric-input-card-feature";
+import "../card-features/hui-select-card-feature";
 import "../card-features/hui-select-options-card-feature";
 import "../card-features/hui-target-temperature-card-feature";
 import "../card-features/hui-target-humidity-card-feature";
@@ -55,6 +56,7 @@ const TYPES = new Set<LovelaceCardFeatureConfig["type"]>([
   "lock-open-door",
   "media-player-volume-slider",
   "numeric-input",
+  "select",
   "select-options",
   "target-humidity",
   "target-temperature",

@@ -88,6 +88,11 @@ export interface SelectOptionsCardFeatureConfig {
   options?: string[];
 }
 
+export interface SelectCardFeatureConfig {
+  type: "select";
+  entity_id: string;
+}
+
 export interface NumericInputCardFeatureConfig {
   type: "numeric-input";
   style?: "buttons" | "slider";
@@ -171,6 +176,7 @@ export type LovelaceCardFeatureConfig =
   | LockOpenDoorCardFeatureConfig
   | MediaPlayerVolumeSliderCardFeatureConfig
   | NumericInputCardFeatureConfig
+  | SelectCardFeatureConfig
   | SelectOptionsCardFeatureConfig
   | TargetHumidityCardFeatureConfig
   | TargetTemperatureCardFeatureConfig
