@@ -7,9 +7,15 @@ from typing import Any
 import pytest
 
 from aiobambulab import (
+    Ams,
+    AmsTray,
+    ErrorSeverity,
+    Filament,
+    PrinterError,
     PrinterInfo,
     PrinterModel,
     PrinterState,
+    PrintStage,
     PrintState,
     SpeedProfile,
 )
@@ -45,6 +51,9 @@ def test_state_of_an_idle_printer() -> None:
         speed_profile=SpeedProfile.STANDARD,
         chamber_light_on=True,
         wifi_signal=-45,
+        stage=PrintStage.IDLE,
+        speed_percentage=100,
+        nozzle_diameter=0.4,
     )
 
 
@@ -68,6 +77,10 @@ def test_state_of_a_printer_without_chamber_sensor() -> None:
         speed_profile=SpeedProfile.SPORT,
         chamber_light_on=False,
         wifi_signal=-58,
+        stage=PrintStage.PRINTING,
+        speed_percentage=124,
+        nozzle_diameter=0.4,
+        nozzle_type="stainless_steel",
     )
 
 
@@ -281,3 +294,316 @@ def test_print_states(reported: str, state: PrintState) -> None:
 def test_accepts_commands(report: dict[str, Any], accepts_commands: bool) -> None:  # noqa: FBT001
     """Newer firmware tells when it only accepts commands in developer mode."""
     assert PrinterState.from_report(report).accepts_commands is accepts_commands
+
+
+@pytest.mark.parametrize(
+    ("report", "stage"),
+    [
+        ({"gcode_state": "RUNNING", "stg_cur": 0}, PrintStage.PRINTING),
+        ({"gcode_state": "RUNNING", "stg_cur": 1}, PrintStage.AUTO_BED_LEVELING),
+        ({"gcode_state": "PAUSE", "stg_cur": 6}, PrintStage.PAUSED_FILAMENT_RUNOUT),
+        ({"gcode_state": "RUNNING", "stg_cur": "14"}, PrintStage.CLEANING_NOZZLE_TIP),
+        ({"gcode_state": "IDLE", "stg_cur": -1}, PrintStage.IDLE),
+        ({"gcode_state": "FINISH", "stg_cur": 255}, PrintStage.IDLE),
+        # A printer that starts up reports that it prints.
+        ({"gcode_state": "IDLE", "stg_cur": 0, "print_type": "idle"}, PrintStage.IDLE),
+        # A printer keeps the stage of a print job that failed.
+        ({"gcode_state": "FAILED", "stg_cur": 4}, PrintStage.IDLE),
+        ({"gcode_state": "RUNNING", "stg_cur": 9999}, None),
+        ({"gcode_state": "RUNNING"}, None),
+        ({"gcode_state": "RUNNING", "stg_cur": "soon"}, None),
+    ],
+)
+def test_stage(report: dict[str, Any], stage: PrintStage | None) -> None:
+    """The stage tells what the printer is doing right now."""
+    assert PrinterState.from_report(report).stage is stage
+
+
+@pytest.mark.parametrize(
+    ("level", "percentage"),
+    [
+        ("0", 0),
+        ("1", 10),
+        ("2", 20),
+        ("3", 20),
+        ("7", 50),
+        ("8", 60),
+        (14, 100),
+        ("15", 100),
+        ("16", None),
+        ("-1", None),
+        ("fast", None),
+        (None, None),
+    ],
+)
+def test_fan_speed(level: Any, percentage: int | None) -> None:
+    """The speed of a fan is a percentage, in the steps it is set in."""
+    state = PrinterState.from_report(
+        {
+            "cooling_fan_speed": level,
+            "big_fan1_speed": level,
+            "big_fan2_speed": level,
+            "heatbreak_fan_speed": level,
+        }
+    )
+
+    assert state.part_fan_speed == percentage
+    assert state.aux_fan_speed == percentage
+    assert state.chamber_fan_speed == percentage
+    assert state.heatbreak_fan_speed == percentage
+
+
+@pytest.mark.parametrize(
+    ("report", "print_error"),
+    [
+        ({"print_error": 117473286}, "0700_8006"),
+        ({"print_error": "83886107"}, "0500_001B"),
+        ({"print_error": 0}, None),
+        ({"print_error": -5}, None),
+        ({"print_error": "broken"}, None),
+        ({}, None),
+    ],
+)
+def test_print_error(report: dict[str, Any], print_error: str | None) -> None:
+    """The error of a print job is the code to look up at Bambu Lab."""
+    assert PrinterState.from_report(report).print_error == print_error
+
+
+def test_errors() -> None:
+    """The problems of a printer have a code to look up, and a severity."""
+    state = PrinterState.from_report(
+        {
+            "hms": [
+                {"attr": 50331904, "code": 65543},
+                {"attr": 117440768, "code": 131078},
+                {"attr": 201327360, "code": 196609},
+                {"attr": 83886336, "code": 262146},
+                {"attr": 83886336, "code": 589825},
+                # Not a problem, or not one that can be read.
+                {"attr": 0, "code": 0},
+                {"attr": -1, "code": 5},
+                {"attr": "many", "code": 5},
+                {"code": 5},
+                "broken",
+            ]
+        }
+    )
+
+    assert state.errors == (
+        PrinterError(code="0300_0100_0001_0007", severity=ErrorSeverity.FATAL),
+        PrinterError(code="0700_0100_0002_0006", severity=ErrorSeverity.SERIOUS),
+        PrinterError(code="0C00_0300_0003_0001", severity=ErrorSeverity.COMMON),
+        PrinterError(code="0500_0100_0004_0002", severity=ErrorSeverity.INFO),
+        PrinterError(code="0500_0100_0009_0001", severity=None),
+    )
+
+
+@pytest.mark.parametrize("hms", [None, "none", {"attr": 1, "code": 1}, []])
+def test_no_errors(hms: Any) -> None:
+    """A printer without problems has no errors."""
+    assert PrinterState.from_report({"hms": hms}).errors == ()
+
+
+AMS_REPORT: dict[str, Any] = {
+    "ams": {
+        "ams": [
+            {
+                "id": "0",
+                "humidity": "4",
+                "humidity_raw": "23",
+                "temp": "24.5",
+                "tray": [
+                    {"id": "0"},
+                    {
+                        "id": "1",
+                        "tray_type": "PLA",
+                        "tray_sub_brands": "PLA Basic",
+                        "tray_color": "f95959ff",
+                        "tray_info_idx": "GFA00",
+                        "remain": 80,
+                        "nozzle_temp_min": "190",
+                        "nozzle_temp_max": "240",
+                    },
+                    {
+                        "id": "2",
+                        "tray_type": "PETG",
+                        "tray_sub_brands": "",
+                        "tray_color": "not a color",
+                        "tray_info_idx": "GFG99",
+                        "remain": -1,
+                        "nozzle_temp_min": "0",
+                        "nozzle_temp_max": "0",
+                    },
+                    {"id": "3", "tray_type": "", "tray_info_idx": "GFL99"},
+                    {"tray_type": "PLA"},
+                    "broken",
+                ],
+            },
+            {"id": "1", "humidity": "9", "humidity_raw": "150", "temp": "warm"},
+            {"humidity": "3"},
+            "broken",
+        ],
+        "tray_now": "1",
+    },
+    "vt_tray": {
+        "id": "254",
+        "tray_type": "TPU",
+        "tray_color": "00112233",
+        "remain": 0,
+    },
+}
+
+
+def test_ams() -> None:
+    """The printer tells about its AMS units, and the filament in their trays."""
+    state = PrinterState.from_report(AMS_REPORT)
+
+    assert state.ams == (
+        Ams(
+            id=0,
+            humidity_index=4,
+            humidity=23,
+            temperature=24.5,
+            trays=(
+                AmsTray(id=0),
+                AmsTray(
+                    id=1,
+                    filament=Filament(
+                        type="PLA",
+                        name="PLA Basic",
+                        color="F95959FF",
+                        remaining=80,
+                        nozzle_temperature_min=190,
+                        nozzle_temperature_max=240,
+                    ),
+                    active=True,
+                ),
+                AmsTray(id=2, filament=Filament(type="PETG")),
+                AmsTray(id=3, filament=Filament()),
+            ),
+        ),
+        Ams(id=1),
+    )
+    assert state.external_spool == Filament(type="TPU", color="00112233", remaining=0)
+    assert not state.external_spool_active
+
+
+@pytest.mark.parametrize(
+    ("tray_now", "active", "external_spool_active"),
+    [
+        ("0", {(0, 0)}, False),
+        ("3", {(0, 3)}, False),
+        ("4", {(1, 0)}, False),
+        ("6", {(1, 2)}, False),
+        ("128", {(128, 0)}, False),
+        ("254", set(), True),
+        ("255", set(), False),
+        ("none", set(), False),
+        (None, set(), False),
+    ],
+)
+def test_active_tray(
+    tray_now: Any,
+    active: set[tuple[int, int]],
+    external_spool_active: bool,  # noqa: FBT001
+) -> None:
+    """The printer tells which tray it prints from."""
+    trays = [{"id": str(tray), "tray_type": "PLA"} for tray in range(4)]
+    state = PrinterState.from_report(
+        {
+            "ams": {
+                "ams": [
+                    {"id": "0", "tray": trays},
+                    {"id": "1", "tray": trays},
+                    {"id": "128", "tray": trays[:1]},
+                ],
+                "tray_now": tray_now,
+            }
+        }
+    )
+
+    assert {
+        (unit.id, tray.id) for unit in state.ams for tray in unit.trays if tray.active
+    } == active
+    assert state.external_spool_active is external_spool_active
+
+
+@pytest.mark.parametrize(
+    "report",
+    [{}, {"ams": None}, {"ams": {}}, {"ams": {"ams": "none"}}, {"vt_tray": "none"}],
+)
+def test_no_ams(report: dict[str, Any]) -> None:
+    """A printer without an AMS has none."""
+    state = PrinterState.from_report(report)
+
+    assert state.ams == ()
+    assert state.external_spool is None
+
+
+@pytest.mark.parametrize(
+    ("report", "expected"),
+    [
+        (
+            {"ipcam": {"timelapse": "enable", "ipcam_record": "disable"}},
+            PrinterState(timelapse_enabled=True, recording_enabled=False),
+        ),
+        ({"ipcam": {"timelapse": "sometimes", "ipcam_record": ""}}, PrinterState()),
+        ({"ipcam": "none"}, PrinterState()),
+        ({"sdcard": True}, PrinterState(sd_card_present=True)),
+        ({"sdcard": False}, PrinterState(sd_card_present=False)),
+        ({"sdcard": "yes"}, PrinterState()),
+        ({"spd_mag": 124}, PrinterState(speed_percentage=124)),
+        ({"nozzle_diameter": "0.6"}, PrinterState(nozzle_diameter=0.6)),
+        ({"nozzle_diameter": "0"}, PrinterState()),
+        ({"nozzle_type": "hardened_steel"}, PrinterState(nozzle_type="hardened_steel")),
+        (
+            {"upgrade_state": {"ota_new_version_number": "01.09.00.00"}},
+            PrinterState(available_firmware_version="01.09.00.00"),
+        ),
+        (
+            {
+                "upgrade_state": {
+                    "ota_new_version_number": "",
+                    "new_ver_list": [
+                        "broken",
+                        {"name": "ams/0", "new_ver": "00.00.06.49"},
+                        {
+                            "name": "ota",
+                            "cur_ver": "01.06.01.02",
+                            "new_ver": "01.07.00.00",
+                        },
+                    ],
+                }
+            },
+            PrinterState(available_firmware_version="01.07.00.00"),
+        ),
+        (
+            {"upgrade_state": {"new_ver_list": [{"name": "ams/0", "new_ver": "1"}]}},
+            PrinterState(),
+        ),
+        ({"upgrade_state": {"new_ver_list": "none"}}, PrinterState()),
+        ({"upgrade_state": "idle"}, PrinterState()),
+    ],
+)
+def test_other_values(report: dict[str, Any], expected: PrinterState) -> None:
+    """The printer tells about its camera, its storage, its nozzle, and updates."""
+    assert PrinterState.from_report(report) == expected
+
+
+@pytest.mark.parametrize(
+    ("color", "expected"),
+    [
+        ("f95959ff", "F95959FF"),
+        ("nothexxx", None),
+        ("FFF", None),
+        (12345678, None),
+        (None, None),
+    ],
+)
+def test_filament_color(color: Any, expected: str | None) -> None:
+    """The color of a filament is one, or it is not known."""
+    state = PrinterState.from_report(
+        {"vt_tray": {"tray_type": "PLA", "tray_color": color}}
+    )
+
+    assert state.external_spool == Filament(type="PLA", color=expected)

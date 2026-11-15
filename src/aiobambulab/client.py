@@ -8,7 +8,7 @@ import json
 import logging
 import secrets
 import ssl
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, Self, TypeIs
 from urllib.parse import quote
 
 import aiomqtt
@@ -36,6 +36,7 @@ from .exceptions import (
 from .models import (
     MODELS_WITH_CAMERA_IMAGES,
     SPEED_PROFILES,
+    Fan,
     PrinterInfo,
     PrinterState,
     SpeedProfile,
@@ -43,7 +44,7 @@ from .models import (
 from .tls import VERIFY_CODE_HOSTNAME_MISMATCH, create_ssl_context
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
     from types import TracebackType
 
 _LOGGER = logging.getLogger(__name__)
@@ -53,6 +54,15 @@ _LOGGER = logging.getLogger(__name__)
 _AUTHENTICATION_CODES = frozenset({4, 5, 134, 135})
 
 _SPEED_LEVELS = {profile: level for level, profile in SPEED_PROFILES.items()}
+
+# The number of each fan in the G-code that sets its speed.
+_FAN_NUMBERS = {Fan.PART_COOLING: 1, Fan.AUXILIARY: 2, Fan.CHAMBER: 3}
+
+# What a printer can calibrate, and the bit that asks for it.
+_CALIBRATION_LIDAR = 1 << 0
+_CALIBRATION_BED_LEVELING = 1 << 1
+_CALIBRATION_VIBRATION_COMPENSATION = 1 << 2
+_CALIBRATION_MOTOR_NOISE_CANCELLATION = 1 << 3
 
 
 def _convert_error(err: aiomqtt.MqttError) -> BambuLabError:
@@ -74,12 +84,38 @@ def _convert_error(err: aiomqtt.MqttError) -> BambuLabError:
     return BambuLabConnectionError(str(err))
 
 
+def _has_ids(value: Any) -> TypeIs[list[dict[str, Any]]]:
+    """Return whether a value is a list of things that each have an id."""
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(item, dict) and "id" in item for item in value)
+    )
+
+
+def _merge_by_id(
+    current: list[dict[str, Any]], update: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Merge an update into a list of things with an id, like the trays of an AMS."""
+    merged = {item["id"]: item for item in current}
+    for item in update:
+        known = merged.get(item["id"])
+        # Nothing but an id means that what was there is gone, like a spool.
+        if known is None or set(item) <= {"id", "state"}:
+            merged[item["id"]] = item
+        else:
+            _merge(known, item)
+    return list(merged.values())
+
+
 def _merge(target: dict[str, Any], update: dict[str, Any]) -> None:
     """Merge an update into a report, object by object."""
     for key, value in update.items():
         current = target.get(key)
         if isinstance(value, dict) and isinstance(current, dict):
             _merge(current, value)
+        elif _has_ids(value) and _has_ids(current):
+            target[key] = _merge_by_id(current, value)
         else:
             target[key] = value
 
@@ -317,6 +353,91 @@ class BambuLabClient:
                 "interval_time": 0,
             },
         )
+
+    async def refresh(self) -> None:
+        """Ask the printer to report its whole state again.
+
+        The client already does this when it connects. Some printers slow down
+        when asked often: do not ask more than once every few minutes.
+        """
+        await self._command(
+            "pushing", {"command": "pushall", "version": 1, "push_target": 1}
+        )
+
+    async def send_gcode(self, gcode: str) -> None:
+        """Send G-code to the printer. Put each command on a line of its own."""
+        await self._command(
+            "print", {"command": "gcode_line", "param": f"{gcode.rstrip()}\n"}
+        )
+
+    async def home(self) -> None:
+        """Move the toolhead to its home position."""
+        await self.send_gcode("G28")
+
+    async def set_nozzle_temperature(self, temperature: int) -> None:
+        """Set the temperature of the nozzle, in degrees Celsius. 0 turns it off."""
+        await self.send_gcode(f"M104 S{temperature}")
+
+    async def set_bed_temperature(self, temperature: int) -> None:
+        """Set the temperature of the bed, in degrees Celsius. 0 turns it off."""
+        await self.send_gcode(f"M140 S{temperature}")
+
+    async def set_fan_speed(self, fan: Fan, percentage: int) -> None:
+        """Set the speed of a fan, as a percentage."""
+        if not 0 <= percentage <= 100:  # noqa: PLR2004
+            msg = f"The speed of a fan is from 0 to 100, not {percentage}"
+            raise ValueError(msg)
+        speed = round(255 * percentage / 100)
+        await self.send_gcode(f"M106 P{_FAN_NUMBERS[fan]} S{speed}")
+
+    async def set_timelapse(self, *, enabled: bool) -> None:
+        """Set whether the printer makes a timelapse of its print jobs."""
+        await self._command(
+            "camera",
+            {
+                "command": "ipcam_timelapse",
+                "control": "enable" if enabled else "disable",
+            },
+        )
+
+    async def set_recording(self, *, enabled: bool) -> None:
+        """Set whether the printer records its print jobs."""
+        await self._command(
+            "camera",
+            {
+                "command": "ipcam_record_set",
+                "control": "enable" if enabled else "disable",
+            },
+        )
+
+    async def skip_objects(self, object_ids: Iterable[int]) -> None:
+        """Skip objects for the rest of the print job.
+
+        The ids are the ones in the file that is printed.
+        """
+        await self._command(
+            "print", {"command": "skip_objects", "obj_list": list(object_ids)}
+        )
+
+    async def calibrate(
+        self,
+        *,
+        bed_leveling: bool = False,
+        vibration_compensation: bool = False,
+        motor_noise_cancellation: bool = False,
+        lidar: bool = False,
+    ) -> None:
+        """Start a calibration of what is asked for. Not every printer has it all."""
+        option = (
+            (_CALIBRATION_BED_LEVELING if bed_leveling else 0)
+            | (_CALIBRATION_VIBRATION_COMPENSATION if vibration_compensation else 0)
+            | (_CALIBRATION_MOTOR_NOISE_CANCELLATION if motor_noise_cancellation else 0)
+            | (_CALIBRATION_LIDAR if lidar else 0)
+        )
+        if not option:
+            msg = "Nothing to calibrate"
+            raise ValueError(msg)
+        await self._command("print", {"command": "calibration", "option": option})
 
     async def _command(self, kind: str, command: dict[str, Any]) -> None:
         """Send a command to the printer.

@@ -48,7 +48,7 @@ def _text(body: bytes, offset: int) -> tuple[str, int]:
 class FakePrinter:
     """A printer that listens on localhost."""
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         serial: str,
         access_code: str,
@@ -206,12 +206,32 @@ class FakePrinter:
         if system.get("command") == "ledctrl":
             light = {"node": system["led_node"], "mode": system["led_mode"]}
             return {"lights_report": [light]}
-        command = request.get("print", {})
         if not self.accepts_commands:
             return None
+        camera = request.get("camera", {})
+        settings = {"ipcam_timelapse": "timelapse", "ipcam_record_set": "ipcam_record"}
+        if (setting := settings.get(camera.get("command"))) is not None:
+            return {"ipcam": {setting: camera["control"]}}
+        command = request.get("print", {})
+        if command.get("command") == "gcode_line":
+            return self._handle_gcode(command["param"])
         if command.get("command") == "print_speed":
             return {"spd_lvl": int(command["param"])}
         states = {"pause": "PAUSE", "resume": "RUNNING", "stop": "FAILED"}
         if (state := states.get(command.get("command"))) is not None:
             return {"gcode_state": state}
+        return None
+
+    @staticmethod
+    def _handle_gcode(gcode: str) -> dict[str, Any] | None:
+        """Do what a line of G-code asks, for the few codes a test needs."""
+        code, *parameters = gcode.split()
+        values = {parameter[0]: int(parameter[1:]) for parameter in parameters}
+        if code == "M104":
+            return {"nozzle_target_temper": values["S"]}
+        if code == "M140":
+            return {"bed_target_temper": values["S"]}
+        if code == "M106":
+            fans = {1: "cooling_fan_speed", 2: "big_fan1_speed", 3: "big_fan2_speed"}
+            return {fans[values["P"]]: str(round(values["S"] / 255 * 15))}
         return None

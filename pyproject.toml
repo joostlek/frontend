@@ -90,6 +90,9 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = [
   "ASYNC110", # Tests poll for what the client does in the background
+  "PLR0911", # The fake printer answers many commands
+  "PLR0913", # Tests take as many fixtures and parameters as they need
+  "PLR0917", # Tests take as many fixtures and parameters as they need
   "PLR2004", # Magic values are fine in tests
   "S101", # Asserts are the point of tests
   "SLF001", # Tests may look at private members

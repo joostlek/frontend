@@ -9,7 +9,8 @@ The client connects to the MQTT server that every Bambu Lab printer runs, and fo
 - Typed models and typed errors.
 - Verifies that it talks to your printer: it only accepts a certificate that Bambu Lab issued to the serial number you pass in.
 - Connects again by itself when the connection is lost.
-- Sends the basic commands: pause, resume, or stop a print, set the speed profile, and switch the light.
+- Knows what the printer is doing in detail: the stage of the print job, fans, nozzle, errors, and the filament in each tray of an AMS.
+- Sends commands: pause, resume, or stop a print, set the speed profile, temperatures, and fans, switch the light, and more.
 - Gives you the camera: images for the printers that send images, and the address of the video stream for the printers that have one.
 - Finds the printers on your network.
 
@@ -77,17 +78,46 @@ asyncio.run(main())
 - `client.error` is why the printer is not available, if that is known. The client keeps trying whatever the error is. An error like a rejected access code does not go away by itself, so act on it.
 - Listeners are called when the state, the info, or the availability changes.
 
+### State
+
+`client.state` is a `PrinterState`. Next to the print job and the temperatures, it holds:
+
+- `stage`: what the printer is doing right now, like leveling its bed, changing filament, or being paused because the filament ran out. See `PrintStage`.
+- `part_fan_speed`, `aux_fan_speed`, `chamber_fan_speed`, and `heatbreak_fan_speed`: the speed of each fan, as a percentage.
+- `print_error`: the code of what went wrong with the print job, like `0700_8006`.
+- `errors`: the problems the printer reports, each with the code that Bambu Lab calls an HMS code, and a severity.
+- `ams`: the AMS units, each with its humidity, its temperature, and its trays. A tray has the `Filament` that is in it, with its type, name, color, and what remains of it. `active` tells which tray the printer prints from.
+- `external_spool` and `external_spool_active`: the same for the spool that is not in an AMS.
+- `nozzle_diameter` and `nozzle_type`.
+- `timelapse_enabled` and `recording_enabled`: what the camera does during a print job.
+- `sd_card_present`.
+- `available_firmware_version`: the version the printer can update to, if there is one.
+
+The texts that go with the codes of errors are not part of this library. Bambu Lab publishes them.
+
 ### Commands
 
 ```python
-from aiobambulab import SpeedProfile
+from aiobambulab import Fan, SpeedProfile
 
 await client.set_chamber_light(on=True)
 await client.pause_print()
 await client.resume_print()
 await client.stop_print()
 await client.set_speed_profile(SpeedProfile.SILENT)
+await client.set_nozzle_temperature(215)
+await client.set_bed_temperature(60)
+await client.set_fan_speed(Fan.PART_COOLING, 50)
+await client.set_timelapse(enabled=True)
+await client.set_recording(enabled=False)
+await client.skip_objects([206])
+await client.calibrate(bed_leveling=True)
+await client.home()
+await client.send_gcode("M400")
+await client.refresh()
 ```
+
+Temperatures, fans, and homing are sent as G-code. Whether a printer accepts a G-code depends on its model and its firmware.
 
 A command raises `BambuLabConnectionError` when the printer is not connected. The printer does not confirm a command in a way to rely on: what it did shows in the state it reports afterwards.
 
@@ -149,6 +179,15 @@ uv run mypy
 ```
 
 The tests run the client against a fake printer: a small MQTT server over TLS, in `tests/fake_printer.py`. Nothing in the tests is mocked between the client and the network.
+
+## What is not in this library
+
+- Anything that goes through the Bambu Lab cloud.
+- Starting a print job, and everything else that needs the files on the printer: uploading, the cover image of a print job, and downloading a timelapse.
+- Loading and unloading filament, and drying it in an AMS.
+- The second nozzle of a printer with two: temperatures are those of the nozzle in use.
+- What only a few models have, like a laser, a cutter, a door sensor, or an air filter.
+- Updating the firmware.
 
 ## Credits
 

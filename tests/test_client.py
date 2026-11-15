@@ -10,12 +10,15 @@ import aiomqtt
 import pytest
 
 from aiobambulab import (
+    AmsTray,
     BambuLabAuthenticationError,
     BambuLabCertificateError,
     BambuLabClient,
     BambuLabConnectionError,
     BambuLabError,
     BambuLabSerialMismatchError,
+    Fan,
+    Filament,
     PrinterModel,
     PrintState,
     SpeedProfile,
@@ -819,3 +822,232 @@ async def test_printer_that_needs_developer_mode(
     # The printer leaves developer mode off, and reports so.
     printer.push(status(fun="3EC18FFF9CFF"))
     await wait_for(lambda: client.state.accepts_commands)
+
+
+async def test_update_of_a_tray(printer: FakePrinter, client: BambuLabClient) -> None:
+    """The client merges what changed in one tray, and keeps the other trays."""
+    assert printer.status is not None
+    printer.status["print"]["ams"] = {
+        "ams": [
+            {
+                "id": "0",
+                "humidity": "4",
+                "tray": [
+                    {"id": "0", "tray_type": "PLA", "remain": 80},
+                    {"id": "1", "tray_type": "PETG", "remain": 50},
+                ],
+            }
+        ],
+        "tray_now": "0",
+    }
+    await client.connect()
+    pla = AmsTray(id=0, filament=Filament(type="PLA", remaining=80), active=True)
+    assert client.state.ams[0].trays == (
+        pla,
+        AmsTray(id=1, filament=Filament(type="PETG", remaining=50)),
+    )
+
+    less_petg = AmsTray(id=1, filament=Filament(type="PETG", remaining=49))
+    printer.push(
+        status(ams={"ams": [{"id": "0", "tray": [{"id": "1", "remain": 49}]}]})
+    )
+    await wait_for(lambda: client.state.ams[0].trays[1] == less_petg)
+
+    assert client.state.ams[0].humidity_index == 4
+    assert client.state.ams[0].trays == (pla, less_petg)
+
+    # A tray that only has an id anymore, is empty.
+    printer.push(status(ams={"ams": [{"id": "0", "tray": [{"id": "1"}]}]}))
+    await wait_for(lambda: client.state.ams[0].trays[1].filament is None)
+
+    assert client.state.ams[0].trays == (pla, AmsTray(id=1))
+
+    # An AMS that was not there before, is added.
+    printer.push(status(ams={"ams": [{"id": "1", "tray": [{"id": "0"}]}]}))
+    await wait_for(lambda: len(client.state.ams) == 2)
+
+    assert client.state.ams[0].trays == (pla, AmsTray(id=1))
+    assert client.state.ams[1].trays == (AmsTray(id=0),)
+
+
+async def test_refresh(printer: FakePrinter, client: BambuLabClient) -> None:
+    """The client asks the printer for its whole state again."""
+    await client.connect()
+
+    await client.refresh()
+    await wait_for(lambda: len(printer.requests) == 3)
+
+    assert printer.requests[2] == {
+        "pushing": {
+            "sequence_id": "3",
+            "command": "pushall",
+            "version": 1,
+            "push_target": 1,
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    ("gcode", "sent"),
+    [("G28", "G28\n"), ("M400\nG91\n\n", "M400\nG91\n")],
+)
+async def test_send_gcode(
+    printer: FakePrinter, client: BambuLabClient, gcode: str, sent: str
+) -> None:
+    """The client sends G-code, which always ends in a new line."""
+    await client.connect()
+
+    await client.send_gcode(gcode)
+    await wait_for(lambda: len(printer.requests) == 3)
+
+    assert printer.requests[2] == {
+        "print": {"sequence_id": "3", "command": "gcode_line", "param": sent}
+    }
+
+
+async def test_home(printer: FakePrinter, client: BambuLabClient) -> None:
+    """The client asks the printer to move its toolhead home."""
+    await client.connect()
+
+    await client.home()
+    await wait_for(lambda: len(printer.requests) == 3)
+
+    assert printer.requests[2]["print"]["param"] == "G28\n"
+
+
+async def test_set_temperatures(printer: FakePrinter, client: BambuLabClient) -> None:
+    """The client asks the printer to heat its nozzle and its bed."""
+    await client.connect()
+
+    await client.set_nozzle_temperature(215)
+    await wait_for(lambda: client.state.nozzle_target_temperature == 215)
+    await client.set_bed_temperature(0)
+    await wait_for(lambda: client.state.bed_target_temperature == 0)
+
+    assert [request["print"]["param"] for request in printer.requests[2:]] == [
+        "M104 S215\n",
+        "M140 S0\n",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("fan", "percentage", "gcode", "attribute", "reported"),
+    [
+        (Fan.PART_COOLING, 100, "M106 P1 S255\n", "part_fan_speed", 100),
+        (Fan.AUXILIARY, 50, "M106 P2 S128\n", "aux_fan_speed", 60),
+        (Fan.CHAMBER, 0, "M106 P3 S0\n", "chamber_fan_speed", 0),
+    ],
+)
+async def test_set_fan_speed(
+    printer: FakePrinter,
+    client: BambuLabClient,
+    fan: Fan,
+    percentage: int,
+    gcode: str,
+    attribute: str,
+    reported: int,
+) -> None:
+    """The client asks the printer for another speed of a fan."""
+    assert printer.status is not None
+    printer.status["print"] |= {
+        "cooling_fan_speed": "5",
+        "big_fan1_speed": "5",
+        "big_fan2_speed": "5",
+    }
+    await client.connect()
+
+    await client.set_fan_speed(fan, percentage)
+    await wait_for(lambda: getattr(client.state, attribute) == reported)
+
+    assert printer.requests[2]["print"]["param"] == gcode
+
+
+@pytest.mark.parametrize("percentage", [-1, 101])
+async def test_set_fan_speed_out_of_range(
+    printer: FakePrinter, client: BambuLabClient, percentage: int
+) -> None:
+    """The speed of a fan is a percentage."""
+    await client.connect()
+
+    with pytest.raises(ValueError, match="from 0 to 100"):
+        await client.set_fan_speed(Fan.PART_COOLING, percentage)
+
+    assert len(printer.requests) == 2
+
+
+async def test_set_timelapse_and_recording(
+    printer: FakePrinter, client: BambuLabClient
+) -> None:
+    """The client asks the printer to make a timelapse, and to record."""
+    await client.connect()
+    assert client.state.timelapse_enabled is None
+
+    await client.set_timelapse(enabled=True)
+    await wait_for(lambda: client.state.timelapse_enabled is True)
+    await client.set_timelapse(enabled=False)
+    await wait_for(lambda: client.state.timelapse_enabled is False)
+    await client.set_recording(enabled=True)
+    await wait_for(lambda: client.state.recording_enabled is True)
+    await client.set_recording(enabled=False)
+    await wait_for(lambda: client.state.recording_enabled is False)
+
+    assert [request["camera"] for request in printer.requests[2:]] == [
+        {"sequence_id": "3", "command": "ipcam_timelapse", "control": "enable"},
+        {"sequence_id": "4", "command": "ipcam_timelapse", "control": "disable"},
+        {"sequence_id": "5", "command": "ipcam_record_set", "control": "enable"},
+        {"sequence_id": "6", "command": "ipcam_record_set", "control": "disable"},
+    ]
+
+
+async def test_skip_objects(printer: FakePrinter, client: BambuLabClient) -> None:
+    """The client asks the printer to skip objects of the print job."""
+    await client.connect()
+
+    await client.skip_objects(iter([206, 315]))
+    await wait_for(lambda: len(printer.requests) == 3)
+
+    assert printer.requests[2] == {
+        "print": {"sequence_id": "3", "command": "skip_objects", "obj_list": [206, 315]}
+    }
+
+
+@pytest.mark.parametrize(
+    ("what", "option"),
+    [
+        ({"lidar": True}, 1),
+        ({"bed_leveling": True}, 2),
+        ({"vibration_compensation": True}, 4),
+        ({"motor_noise_cancellation": True}, 8),
+        (
+            {
+                "lidar": True,
+                "bed_leveling": True,
+                "vibration_compensation": True,
+                "motor_noise_cancellation": True,
+            },
+            15,
+        ),
+    ],
+)
+async def test_calibrate(
+    printer: FakePrinter, client: BambuLabClient, what: dict[str, bool], option: int
+) -> None:
+    """The client asks the printer to calibrate what is asked for."""
+    await client.connect()
+
+    await client.calibrate(**what)
+    await wait_for(lambda: len(printer.requests) == 3)
+
+    assert printer.requests[2] == {
+        "print": {"sequence_id": "3", "command": "calibration", "option": option}
+    }
+
+
+async def test_calibrate_nothing(printer: FakePrinter, client: BambuLabClient) -> None:
+    """A calibration is of something."""
+    await client.connect()
+
+    with pytest.raises(ValueError, match="Nothing to calibrate"):
+        await client.calibrate()
+
+    assert len(printer.requests) == 2
