@@ -1,6 +1,7 @@
 """Asynchronous Python client for Bambu Lab 3D printers on the local network."""
 
 from .client import BambuLabClient
+from .discovery import DiscoveredPrinter, discover
 from .exceptions import (
     BambuLabAuthenticationError,
     BambuLabCertificateError,
@@ -18,10 +19,12 @@ __all__ = [
     "BambuLabConnectionError",
     "BambuLabError",
     "BambuLabSerialMismatchError",
+    "DiscoveredPrinter",
     "PrintState",
     "PrinterInfo",
     "PrinterModel",
     "PrinterState",
     "SpeedProfile",
     "create_ssl_context",
+    "discover",
 ]

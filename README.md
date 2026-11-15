@@ -11,6 +11,7 @@ The client connects to the MQTT server that every Bambu Lab printer runs, and fo
 - Connects again by itself when the connection is lost.
 - Sends the basic commands: pause, resume, or stop a print, set the speed profile, and switch the light.
 - Gives you the camera: images for the printers that send images, and the address of the video stream for the printers that have one.
+- Finds the printers on your network.
 
 ## Installation
 
@@ -25,6 +26,21 @@ pip install aiobambulab
 - The LAN access code of the printer.
 
 You find all three on the screen of the printer. The printer does not have to be in LAN only mode.
+
+## Finding printers
+
+A printer announces itself on the network every few seconds. `discover()` listens for that, so you do not have to look up the IP address and the serial number:
+
+```python
+from aiobambulab import discover
+
+for printer in await discover():
+    print(printer.serial, printer.host, printer.name)
+```
+
+It returns shortly after the last printer showed up, or after 15 seconds when there are none. The access code is not announced: that one you still read from the screen of the printer.
+
+Announcements do not cross routers, so this only finds printers on the same network.
 
 ## Usage
 
