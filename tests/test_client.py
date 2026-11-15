@@ -19,6 +19,7 @@ from aiobambulab import (
     BambuLabSerialMismatchError,
     PrinterModel,
     PrintState,
+    SpeedProfile,
 )
 from aiobambulab.tls import PrinterSSLContext
 
@@ -697,3 +698,122 @@ async def test_disconnect_when_closing_the_connection_fails(
     with pytest.raises(BambuLabError):
         await connect
     assert attempts == 1
+
+
+async def test_pause_resume_and_stop(
+    printer: FakePrinter, client: BambuLabClient
+) -> None:
+    """The client asks the printer to pause, resume, and stop the print job."""
+    await client.connect()
+
+    await client.pause_print()
+    await wait_for(lambda: client.state.print_state is PrintState.PAUSED)
+    await client.resume_print()
+    await wait_for(lambda: client.state.print_state is PrintState.PRINTING)
+    await client.stop_print()
+    await wait_for(lambda: client.state.print_state is PrintState.FAILED)
+
+    assert printer.requests[2:] == [
+        {"print": {"sequence_id": "3", "command": "pause", "param": ""}},
+        {"print": {"sequence_id": "4", "command": "resume", "param": ""}},
+        {"print": {"sequence_id": "5", "command": "stop", "param": ""}},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("profile", "level"),
+    [
+        (SpeedProfile.SILENT, "1"),
+        (SpeedProfile.STANDARD, "2"),
+        (SpeedProfile.SPORT, "3"),
+        (SpeedProfile.LUDICROUS, "4"),
+    ],
+)
+async def test_set_speed_profile(
+    printer: FakePrinter, client: BambuLabClient, profile: SpeedProfile, level: str
+) -> None:
+    """The client asks the printer for another speed profile."""
+    assert printer.status is not None
+    printer.status["print"]["spd_lvl"] = 0
+    await client.connect()
+    assert client.state.speed_profile is None
+
+    await client.set_speed_profile(profile)
+    await wait_for(lambda: client.state.speed_profile is profile)
+
+    assert printer.requests[2] == {
+        "print": {"sequence_id": "3", "command": "print_speed", "param": level}
+    }
+
+
+async def test_set_chamber_light(printer: FakePrinter, client: BambuLabClient) -> None:
+    """The client asks the printer to turn the light on and off."""
+    await client.connect()
+    assert client.state.chamber_light_on is False
+
+    await client.set_chamber_light(on=True)
+    await wait_for(lambda: client.state.chamber_light_on is True)
+    await client.set_chamber_light(on=False)
+    await wait_for(lambda: client.state.chamber_light_on is False)
+
+    assert printer.requests[2] == {
+        "system": {
+            "sequence_id": "3",
+            "command": "ledctrl",
+            "led_node": "chamber_light",
+            "led_mode": "on",
+            "led_on_time": 500,
+            "led_off_time": 500,
+            "loop_times": 0,
+            "interval_time": 0,
+        }
+    }
+    assert printer.requests[3]["system"]["led_mode"] == "off"
+
+
+async def test_command_while_not_connected(
+    printer: FakePrinter, client: BambuLabClient
+) -> None:
+    """A command needs a connection to the printer."""
+    with pytest.raises(BambuLabConnectionError, match="not connected"):
+        await client.pause_print()
+
+    await client.connect()
+    await printer.stop()
+    await wait_for(lambda: not client.available)
+
+    with pytest.raises(BambuLabConnectionError, match="not connected"):
+        await client.set_chamber_light(on=True)
+
+
+async def test_command_that_cannot_be_sent(
+    client: BambuLabClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A command that the MQTT client cannot send is a connection error."""
+    await client.connect()
+    assert client._mqtt is not None
+    monkeypatch.setattr(
+        client._mqtt, "publish", Mock(side_effect=aiomqtt.MqttError("Gone"))
+    )
+
+    with pytest.raises(BambuLabConnectionError, match="Gone"):
+        await client.pause_print()
+
+
+async def test_printer_that_needs_developer_mode(
+    printer: FakePrinter, client: BambuLabClient
+) -> None:
+    """The client tells when the printer only accepts the command for the light."""
+    printer.accepts_commands = False
+    assert printer.status is not None
+    printer.status["print"]["fun"] = "3EC1AFFF9CFF"
+    await client.connect()
+
+    assert client.state.accepts_commands is False
+
+    await client.set_chamber_light(on=True)
+    await wait_for(lambda: client.state.chamber_light_on is True)
+
+    # The printer leaves developer mode off, and reports so.
+    printer.push(status(fun="3EC18FFF9CFF"))
+    await wait_for(lambda: client.state.accepts_commands)

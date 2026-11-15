@@ -68,6 +68,8 @@ class FakePrinter:
         self.version = version
         self.status = status
         self.refuse_code = refuse_code
+        # Like a printer that is not in developer mode, when False.
+        self.accepts_commands = True
         self.requests: list[dict[str, Any]] = []
         self.client_ids: list[str] = []
         self.connections = 0
@@ -195,3 +197,21 @@ class FakePrinter:
             self.push(self.version)
         if "pushing" in request and self.status is not None:
             self.push(self.status)
+        if (change := self._handle_command(request)) is not None:
+            self.push({"print": {"command": "push_status", "msg": 1, **change}})
+
+    def _handle_command(self, request: dict[str, Any]) -> dict[str, Any] | None:
+        """Do what a command asks, and return what changed."""
+        system = request.get("system", {})
+        if system.get("command") == "ledctrl":
+            light = {"node": system["led_node"], "mode": system["led_mode"]}
+            return {"lights_report": [light]}
+        command = request.get("print", {})
+        if not self.accepts_commands:
+            return None
+        if command.get("command") == "print_speed":
+            return {"spd_lvl": int(command["param"])}
+        states = {"pause": "PAUSE", "resume": "RUNNING", "stop": "FAILED"}
+        if (state := states.get(command.get("command"))) is not None:
+            return {"gcode_state": state}
+        return None

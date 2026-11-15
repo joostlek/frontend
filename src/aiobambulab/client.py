@@ -29,7 +29,7 @@ from .exceptions import (
     BambuLabError,
     BambuLabSerialMismatchError,
 )
-from .models import PrinterInfo, PrinterState
+from .models import SPEED_PROFILES, PrinterInfo, PrinterState, SpeedProfile
 from .tls import VERIFY_CODE_HOSTNAME_MISMATCH, create_ssl_context
 
 if TYPE_CHECKING:
@@ -41,6 +41,8 @@ _LOGGER = logging.getLogger(__name__)
 # The codes a printer can refuse the access code with: "bad user name or
 # password" and "not authorized", as MQTT 3.1.1 and as MQTT 5 reason codes.
 _AUTHENTICATION_CODES = frozenset({4, 5, 134, 135})
+
+_SPEED_LEVELS = {profile: level for level, profile in SPEED_PROFILES.items()}
 
 
 def _convert_error(err: aiomqtt.MqttError) -> BambuLabError:
@@ -112,6 +114,7 @@ class BambuLabClient:
         self._listeners: list[Callable[[], None]] = []
 
         self._task: asyncio.Task[None] | None = None
+        self._mqtt: aiomqtt.Client | None = None
         self._connect_lock = asyncio.Lock()
         self._first_attempt = asyncio.Event()
         self._error: BambuLabError | None = None
@@ -223,6 +226,54 @@ class BambuLabClient:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
+    async def pause_print(self) -> None:
+        """Pause the print job."""
+        await self._command("print", {"command": "pause", "param": ""})
+
+    async def resume_print(self) -> None:
+        """Resume the print job."""
+        await self._command("print", {"command": "resume", "param": ""})
+
+    async def stop_print(self) -> None:
+        """Stop the print job. A stopped print job cannot be resumed."""
+        await self._command("print", {"command": "stop", "param": ""})
+
+    async def set_speed_profile(self, profile: SpeedProfile) -> None:
+        """Set the speed profile. A printer only does this while it prints."""
+        await self._command(
+            "print", {"command": "print_speed", "param": str(_SPEED_LEVELS[profile])}
+        )
+
+    async def set_chamber_light(self, *, on: bool) -> None:
+        """Turn the light in the chamber on or off."""
+        await self._command(
+            "system",
+            {
+                "command": "ledctrl",
+                "led_node": "chamber_light",
+                "led_mode": "on" if on else "off",
+                # Only used to flash the light, but always required.
+                "led_on_time": 500,
+                "led_off_time": 500,
+                "loop_times": 0,
+                "interval_time": 0,
+            },
+        )
+
+    async def _command(self, kind: str, command: dict[str, Any]) -> None:
+        """Send a command to the printer.
+
+        The printer does not confirm a command in a way to rely on: what it
+        did shows in the state it reports afterwards.
+        """
+        if (mqtt := self._mqtt) is None or not self._available:
+            msg = "The printer is not connected"
+            raise BambuLabConnectionError(msg)
+        try:
+            await self._request(mqtt, kind, command)
+        except aiomqtt.MqttError as err:
+            raise BambuLabConnectionError(str(err)) from err
+
     async def __aenter__(self) -> Self:
         """Connect to the printer."""
         await self.connect()
@@ -313,6 +364,8 @@ class BambuLabClient:
                 # The host is not something that can be connected to.
                 raise BambuLabConnectionError(str(err)) from err
             _LOGGER.debug("Connected to printer %s", self._serial)
+            self._mqtt = mqtt
+            stack.callback(setattr, self, "_mqtt", None)
             await mqtt.subscribe(f"device/{self._serial}/report")
             await self._request(mqtt, "info", {"command": "get_version"})
             await self._request(

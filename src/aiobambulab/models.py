@@ -77,7 +77,7 @@ _PRINT_STATES: Final = {
     "FAILED": PrintState.FAILED,
 }
 
-_SPEED_PROFILES: Final = {
+SPEED_PROFILES: Final = {
     1: SpeedProfile.SILENT,
     2: SpeedProfile.STANDARD,
     3: SpeedProfile.SPORT,
@@ -85,6 +85,10 @@ _SPEED_PROFILES: Final = {
 }
 
 _CHAMBER_LIGHT: Final = "chamber_light"
+
+# How a printer tells that it only accepts commands that are signed.
+_FUN_SIGNATURE_REQUIRED: Final = 0x20000000
+_FLAG3_AUTHORIZATION_CONTROL: Final = 0x10
 
 
 def _as_float(value: Any) -> float | None:
@@ -218,6 +222,19 @@ def _chamber_light_on(report: dict[str, Any]) -> bool | None:
     return None
 
 
+def _accepts_commands(report: dict[str, Any]) -> bool:
+    """Return whether the printer accepts commands that control it."""
+    fun = report.get("fun")
+    if isinstance(fun, str) and fun:
+        try:
+            return not int(fun, 16) & _FUN_SIGNATURE_REQUIRED
+        except ValueError:
+            return True
+    # Some firmware reports this elsewhere.
+    flag3 = _as_int(report.get("flag3"))
+    return flag3 is None or not flag3 & _FLAG3_AUTHORIZATION_CONTROL
+
+
 def _print_state(report: dict[str, Any]) -> PrintState | None:
     """Return the state of the print job."""
     return _PRINT_STATES.get(str(report.get("gcode_state")).upper())
@@ -237,6 +254,10 @@ class PrinterState:
 
     A value is None when the printer does not report it. Temperatures are in
     whole degrees Celsius.
+
+    Newer firmware only accepts commands when the printer is in developer
+    mode. `accepts_commands` tells whether it does. The chamber light is the
+    exception: a printer always accepts the command for it.
     """
 
     print_state: PrintState | None = None
@@ -253,6 +274,7 @@ class PrinterState:
     speed_profile: SpeedProfile | None = None
     chamber_light_on: bool | None = None
     wifi_signal: int | None = None
+    accepts_commands: bool = True
 
     @classmethod
     def from_report(
@@ -276,8 +298,9 @@ class PrinterState:
             bed_target_temperature=_as_degrees(report.get("bed_target_temper")),
             chamber_temperature=_chamber_temperature(report, model),
             speed_profile=(
-                None if speed_level is None else _SPEED_PROFILES.get(speed_level)
+                None if speed_level is None else SPEED_PROFILES.get(speed_level)
             ),
             chamber_light_on=_chamber_light_on(report),
             wifi_signal=_wifi_signal(report),
+            accepts_commands=_accepts_commands(report),
         )

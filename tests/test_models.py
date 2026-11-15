@@ -260,3 +260,24 @@ def test_info_without_usable_modules(modules: Any) -> None:
 def test_print_states(reported: str, state: PrintState) -> None:
     """Every state of a print job has a name that says what it is."""
     assert PrinterState.from_report({"gcode_state": reported}).print_state is state
+
+
+@pytest.mark.parametrize(
+    ("report", "accepts_commands"),
+    [
+        ({}, True),
+        # Developer mode is on, and off.
+        ({"fun": "3EC18FFF9CFF"}, True),
+        ({"fun": "3EC1AFFF9CFF"}, False),
+        # What "fun" tells counts, when the printer reports it.
+        ({"fun": "3EC18FFF9CFF", "flag3": 671}, True),
+        ({"fun": "", "flag3": 671}, False),
+        ({"fun": "", "flag3": 15}, True),
+        ({"flag3": 31}, False),
+        ({"fun": "no number", "flag3": 31}, True),
+        ({"fun": 5, "flag3": "no number"}, True),
+    ],
+)
+def test_accepts_commands(report: dict[str, Any], accepts_commands: bool) -> None:  # noqa: FBT001
+    """Newer firmware tells when it only accepts commands in developer mode."""
+    assert PrinterState.from_report(report).accepts_commands is accepts_commands

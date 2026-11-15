@@ -9,8 +9,7 @@ The client connects to the MQTT server that every Bambu Lab printer runs, and fo
 - Typed models and typed errors.
 - Verifies that it talks to your printer: it only accepts a certificate that Bambu Lab issued to the serial number you pass in.
 - Connects again by itself when the connection is lost.
-
-This version only reads from the printer. It does not send commands, like pausing a print or switching the light.
+- Sends the basic commands: pause, resume, or stop a print, set the speed profile, and switch the light.
 
 ## Installation
 
@@ -60,6 +59,22 @@ asyncio.run(main())
 - `client.available` is `False` while the connection is lost. The client keeps trying to connect again, and `client.state` keeps the last known state.
 - `client.error` is why the printer is not available, if that is known. The client keeps trying whatever the error is. An error like a rejected access code does not go away by itself, so act on it.
 - Listeners are called when the state, the info, or the availability changes.
+
+### Commands
+
+```python
+from aiobambulab import SpeedProfile
+
+await client.set_chamber_light(on=True)
+await client.pause_print()
+await client.resume_print()
+await client.stop_print()
+await client.set_speed_profile(SpeedProfile.SILENT)
+```
+
+A command raises `BambuLabConnectionError` when the printer is not connected. The printer does not confirm a command in a way to rely on: what it did shows in the state it reports afterwards.
+
+Newer firmware only accepts commands when the printer is in developer mode. `client.state.accepts_commands` tells whether it does. The light is the exception: the printer always accepts the command for it.
 
 ### Errors
 
