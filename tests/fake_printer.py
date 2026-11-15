@@ -69,6 +69,7 @@ class FakePrinter:
         self.status = status
         self.refuse_code = refuse_code
         self.requests: list[dict[str, Any]] = []
+        self.client_ids: list[str] = []
         self.connections = 0
         self.port = 0
         self._ssl_context = ssl_context
@@ -171,7 +172,8 @@ class FakePrinter:
         _, offset = _text(body, 0)
         # Skip the protocol level, the connect flags, and the keep alive.
         offset += 4
-        _, offset = _text(body, offset)
+        client_id, offset = _text(body, offset)
+        self.client_ids.append(client_id)
         username, offset = _text(body, offset)
         password, offset = _text(body, offset)
         accepted = username == "bblp" and password == self.access_code

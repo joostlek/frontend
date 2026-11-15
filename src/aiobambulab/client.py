@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import secrets
 import ssl
 from typing import TYPE_CHECKING, Any, Self
 
@@ -101,6 +102,9 @@ class BambuLabClient:
         self._port = port
         self._ssl_context = ssl_context
         self._timeout = timeout
+        # Not every MQTT server accepts a client without an identifier. This
+        # one has the length and characters that every server has to accept.
+        self._identifier = f"aiobambulab{secrets.token_hex(6)}"
 
         self._info = PrinterInfo(serial=self._serial)
         self._state = PrinterState()
@@ -281,6 +285,7 @@ class BambuLabClient:
             port=self._port,
             username=MQTT_USERNAME,
             password=self._access_code,
+            identifier=self._identifier,
             protocol=aiomqtt.ProtocolVersion.V311,
             tls_context=self._ssl_context,
             keepalive=MQTT_KEEPALIVE,

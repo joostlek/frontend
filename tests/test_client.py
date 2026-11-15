@@ -103,6 +103,19 @@ async def test_connect_with_a_serial_in_lower_case(
         assert client.available
 
 
+async def test_client_identifier(printer: FakePrinter, client: BambuLabClient) -> None:
+    """The client identifies itself in a way every MQTT server accepts."""
+    await client.connect()
+    await printer.drop_clients()
+    await wait_for(lambda: printer.connections == 2 and client.available)
+
+    first, second = printer.client_ids
+    assert first == second
+    assert first.startswith("aiobambulab")
+    assert first.isalnum()
+    assert len(first) == 23
+
+
 async def test_connect_twice(printer: FakePrinter, client: BambuLabClient) -> None:
     """Connecting a connected client does nothing."""
     await client.connect()
