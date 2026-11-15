@@ -21,7 +21,7 @@ pip install aiobambulab
 ## What you need
 
 - The IP address of the printer.
-- The serial number of the printer.
+- The serial number of the printer. It is not case sensitive.
 - The LAN access code of the printer.
 
 You find all three on the screen of the printer. The printer does not have to be in LAN only mode.

@@ -87,6 +87,22 @@ async def test_connect(printer: FakePrinter, client: BambuLabClient) -> None:
     ]
 
 
+async def test_connect_with_a_serial_in_lower_case(
+    printer: FakePrinter, ssl_context: ssl.SSLContext
+) -> None:
+    """The client uses capitals for the serial number, like the printer does."""
+    async with BambuLabClient(
+        "127.0.0.1",
+        SERIAL.lower(),
+        ACCESS_CODE,
+        port=printer.port,
+        ssl_context=ssl_context,
+    ) as client:
+        assert client.serial == SERIAL
+        assert client.info.serial == SERIAL
+        assert client.available
+
+
 async def test_connect_twice(printer: FakePrinter, client: BambuLabClient) -> None:
     """Connecting a connected client does nothing."""
     await client.connect()

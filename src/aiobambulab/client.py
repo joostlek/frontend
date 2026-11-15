@@ -91,17 +91,18 @@ class BambuLabClient:
     ) -> None:
         """Initialize the client.
 
-        Without `ssl_context`, the client only accepts a certificate that
-        Bambu Lab issued to this serial number.
+        The serial number is not case sensitive: printers use capitals, and
+        so does the client. Without `ssl_context`, the client only accepts a
+        certificate that Bambu Lab issued to this serial number.
         """
         self._host = host
-        self._serial = serial
+        self._serial = serial.upper()
         self._access_code = access_code
         self._port = port
         self._ssl_context = ssl_context
         self._timeout = timeout
 
-        self._info = PrinterInfo(serial=serial)
+        self._info = PrinterInfo(serial=self._serial)
         self._state = PrinterState()
         self._available = False
         self._listeners: list[Callable[[], None]] = []
@@ -238,6 +239,9 @@ class BambuLabClient:
                 self._set_available(available=False)
                 if not self._first_attempt.is_set():
                     # The caller of connect() decides if and when to try again.
+                    _LOGGER.debug(
+                        "Could not connect to printer %s: %s", self._serial, error
+                    )
                     return
                 if loop.time() - started > RECONNECT_MAX_DELAY:
                     # The connection held for a while: start over.
