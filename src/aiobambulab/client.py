@@ -112,6 +112,7 @@ class BambuLabClient:
         self._listeners: list[Callable[[], None]] = []
 
         self._task: asyncio.Task[None] | None = None
+        self._connect_lock = asyncio.Lock()
         self._first_attempt = asyncio.Event()
         self._error: BambuLabError | None = None
         self._report: dict[str, Any] = {}
@@ -128,6 +129,16 @@ class BambuLabClient:
     def available(self) -> bool:
         """Return whether the printer is connected and its state is known."""
         return self._available
+
+    @property
+    def error(self) -> BambuLabError | None:
+        """Return why the printer is not available, if that is known.
+
+        While the printer is not available, the client keeps trying to connect,
+        whatever the error. An error like a rejected access code does not go
+        away by itself: it is up to the caller to act on it.
+        """
+        return self._error
 
     @property
     def info(self) -> PrinterInfo:
@@ -165,31 +176,32 @@ class BambuLabClient:
                 did not report its state in time.
 
         """
-        if self._task is not None:
-            return
-        loop = asyncio.get_running_loop()
-        if self._ssl_context is None:
-            self._ssl_context = await loop.run_in_executor(
-                None, create_ssl_context, self._serial
+        async with self._connect_lock:
+            if self._task is not None:
+                return
+            loop = asyncio.get_running_loop()
+            if self._ssl_context is None:
+                self._ssl_context = await loop.run_in_executor(
+                    None, create_ssl_context, self._serial
+                )
+            self._first_attempt.clear()
+            self._error = None
+            self._task = loop.create_task(
+                self._run(), name=f"aiobambulab {self._serial}"
             )
-        self._first_attempt.clear()
-        self._error = None
-        self._task = loop.create_task(self._run(), name=f"aiobambulab {self._serial}")
-        self._task.add_done_callback(self._handle_task_done)
-        try:
-            async with asyncio.timeout(self._timeout):
-                await self._first_attempt.wait()
-        except TimeoutError:
-            self._error = self._timeout_error()
-        except asyncio.CancelledError:
+            try:
+                async with asyncio.timeout(self._timeout):
+                    await self._first_attempt.wait()
+            except TimeoutError:
+                self._error = self._timeout_error()
+            except asyncio.CancelledError:
+                await self.disconnect()
+                raise
+            if self._available:
+                return
+            error = self._error
             await self.disconnect()
-            raise
-        if self._available:
-            return
-        await self.disconnect()
-        raise self._error or BambuLabError(
-            "Unexpected error while connecting to the printer"
-        )
+            raise error or BambuLabError("Disconnected while connecting")
 
     def _timeout_error(self) -> BambuLabConnectionError:
         """Return the error for a printer that did not get available in time."""
@@ -228,6 +240,7 @@ class BambuLabClient:
     async def _run(self) -> None:
         """Keep a connection to the printer open, until cancelled."""
         loop = asyncio.get_running_loop()
+        task = asyncio.current_task()
         delay = RECONNECT_MIN_DELAY
         try:
             while True:
@@ -239,6 +252,18 @@ class BambuLabClient:
                     await self._listen()
                 except aiomqtt.MqttError as err:
                     error = _convert_error(err)
+                except BambuLabError as err:
+                    error = err
+                except Exception:
+                    # A bug must not end the connection for good.
+                    _LOGGER.exception(
+                        "Unexpected error in the connection to printer %s",
+                        self._serial,
+                    )
+                    error = BambuLabError("Unexpected error, see the log")
+                if task is not None and task.cancelling():
+                    # Closing the connection failed, while asked to stop.
+                    return
                 self._error = error
                 self._set_available(available=False)
                 if not self._first_attempt.is_set():
@@ -263,35 +288,30 @@ class BambuLabClient:
             # Never leave connect() waiting, whatever happened.
             self._first_attempt.set()
 
-    def _handle_task_done(self, task: asyncio.Task[None]) -> None:
-        """Report it when the connection ended in a way it never should."""
-        if task.cancelled() or (err := task.exception()) is None:
-            return
-        if self._task is task:
-            self._task = None
-        _LOGGER.error(
-            "Unexpected error in the connection to printer %s",
-            self._serial,
-            exc_info=err,
-        )
-
     async def _listen(self) -> None:
         """Connect to the printer, and handle what it reports."""
         self._report = {}
         self._has_info = False
         self._has_report = False
-        async with aiomqtt.Client(
-            hostname=self._host,
-            port=self._port,
-            username=MQTT_USERNAME,
-            password=self._access_code,
-            identifier=self._identifier,
-            protocol=aiomqtt.ProtocolVersion.V311,
-            tls_context=self._ssl_context,
-            keepalive=MQTT_KEEPALIVE,
-            timeout=self._timeout,
-            logger=_LOGGER.getChild("mqtt"),
-        ) as mqtt:
+        async with contextlib.AsyncExitStack() as stack:
+            try:
+                mqtt = await stack.enter_async_context(
+                    aiomqtt.Client(
+                        hostname=self._host,
+                        port=self._port,
+                        username=MQTT_USERNAME,
+                        password=self._access_code,
+                        identifier=self._identifier,
+                        protocol=aiomqtt.ProtocolVersion.V311,
+                        tls_context=self._ssl_context,
+                        keepalive=MQTT_KEEPALIVE,
+                        timeout=self._timeout,
+                        logger=_LOGGER.getChild("mqtt"),
+                    )
+                )
+            except ValueError as err:
+                # The host is not something that can be connected to.
+                raise BambuLabConnectionError(str(err)) from err
             _LOGGER.debug("Connected to printer %s", self._serial)
             await mqtt.subscribe(f"device/{self._serial}/report")
             await self._request(mqtt, "info", {"command": "get_version"})

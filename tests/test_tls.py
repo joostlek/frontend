@@ -16,6 +16,7 @@ def test_create_ssl_context() -> None:
 
     assert context.verify_mode is ssl.CERT_REQUIRED
     assert context.check_hostname
+    assert context.hostname_checks_common_name
     assert context.maximum_version is ssl.TLSVersion.TLSv1_2
 
 

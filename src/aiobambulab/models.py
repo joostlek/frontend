@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+import math
 from typing import Any, Final, Self
 
 
@@ -30,14 +31,13 @@ class PrintState(StrEnum):
     """What the printer is doing with its print job."""
 
     IDLE = "idle"
-    INIT = "init"
+    INITIALIZING = "initializing"
     SLICING = "slicing"
-    PREPARE = "prepare"
-    RUNNING = "running"
-    PAUSE = "pause"
-    FINISH = "finish"
+    PREPARING = "preparing"
+    PRINTING = "printing"
+    PAUSED = "paused"
+    FINISHED = "finished"
     FAILED = "failed"
-    OFFLINE = "offline"
 
 
 class SpeedProfile(StrEnum):
@@ -65,6 +65,18 @@ _MODELS_WITHOUT_CHAMBER_SENSOR: Final = frozenset(
     }
 )
 
+# The states of a print job, as a printer reports them.
+_PRINT_STATES: Final = {
+    "IDLE": PrintState.IDLE,
+    "INIT": PrintState.INITIALIZING,
+    "SLICING": PrintState.SLICING,
+    "PREPARE": PrintState.PREPARING,
+    "RUNNING": PrintState.PRINTING,
+    "PAUSE": PrintState.PAUSED,
+    "FINISH": PrintState.FINISHED,
+    "FAILED": PrintState.FAILED,
+}
+
 _SPEED_PROFILES: Final = {
     1: SpeedProfile.SILENT,
     2: SpeedProfile.STANDARD,
@@ -76,19 +88,30 @@ _CHAMBER_LIGHT: Final = "chamber_light"
 
 
 def _as_float(value: Any) -> float | None:
-    """Return the value as a float, or None if it is not a number."""
+    """Return the value as a float, or None if it is not a finite number."""
     if isinstance(value, bool):
         return None
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return None
+    return number if math.isfinite(number) else None
 
 
 def _as_int(value: Any) -> int | None:
     """Return the value as an integer, or None if it is not a number."""
     number = _as_float(value)
     return None if number is None else int(number)
+
+
+def _as_degrees(value: Any) -> int | None:
+    """Return a temperature in whole degrees, like the printer shows it.
+
+    Some printers report temperatures in steps of 1/32 degree. That is more
+    than their sensors can tell, and it changes with every report.
+    """
+    number = _as_float(value)
+    return None if number is None else round(number)
 
 
 def _as_text(value: Any) -> str | None:
@@ -167,11 +190,11 @@ class PrinterInfo:
 
 def _chamber_temperature(
     report: dict[str, Any], model: PrinterModel | None
-) -> float | None:
+) -> int | None:
     """Return the temperature of the chamber, if the printer measures it."""
     if model in _MODELS_WITHOUT_CHAMBER_SENSOR:
         return None
-    if (temperature := _as_float(report.get("chamber_temper"))) is not None:
+    if (temperature := _as_degrees(report.get("chamber_temper"))) is not None:
         return temperature
     # Newer firmware reports the chamber as a device. The low 16 bits hold
     # the current temperature, the high 16 bits hold the target.
@@ -181,7 +204,7 @@ def _chamber_temperature(
         return None
     if (value := _as_int(packed)) is None:
         return None
-    return float(value & 0xFFFF)
+    return value & 0xFFFF
 
 
 def _chamber_light_on(report: dict[str, Any]) -> bool | None:
@@ -197,10 +220,7 @@ def _chamber_light_on(report: dict[str, Any]) -> bool | None:
 
 def _print_state(report: dict[str, Any]) -> PrintState | None:
     """Return the state of the print job."""
-    try:
-        return PrintState(str(report.get("gcode_state")).lower())
-    except ValueError:
-        return None
+    return _PRINT_STATES.get(str(report.get("gcode_state")).upper())
 
 
 def _wifi_signal(report: dict[str, Any]) -> int | None:
@@ -215,7 +235,8 @@ def _wifi_signal(report: dict[str, Any]) -> int | None:
 class PrinterState:
     """What a printer is doing right now.
 
-    A value is None when the printer does not report it.
+    A value is None when the printer does not report it. Temperatures are in
+    whole degrees Celsius.
     """
 
     print_state: PrintState | None = None
@@ -224,11 +245,11 @@ class PrinterState:
     remaining_minutes: int | None = None
     current_layer: int | None = None
     total_layers: int | None = None
-    nozzle_temperature: float | None = None
-    nozzle_target_temperature: float | None = None
-    bed_temperature: float | None = None
-    bed_target_temperature: float | None = None
-    chamber_temperature: float | None = None
+    nozzle_temperature: int | None = None
+    nozzle_target_temperature: int | None = None
+    bed_temperature: int | None = None
+    bed_target_temperature: int | None = None
+    chamber_temperature: int | None = None
     speed_profile: SpeedProfile | None = None
     chamber_light_on: bool | None = None
     wifi_signal: int | None = None
@@ -249,10 +270,10 @@ class PrinterState:
             remaining_minutes=_as_int(report.get("mc_remaining_time")),
             current_layer=_as_int(report.get("layer_num")),
             total_layers=_as_int(report.get("total_layer_num")),
-            nozzle_temperature=_as_float(report.get("nozzle_temper")),
-            nozzle_target_temperature=_as_float(report.get("nozzle_target_temper")),
-            bed_temperature=_as_float(report.get("bed_temper")),
-            bed_target_temperature=_as_float(report.get("bed_target_temper")),
+            nozzle_temperature=_as_degrees(report.get("nozzle_temper")),
+            nozzle_target_temperature=_as_degrees(report.get("nozzle_target_temper")),
+            bed_temperature=_as_degrees(report.get("bed_temper")),
+            bed_target_temperature=_as_degrees(report.get("bed_target_temper")),
             chamber_temperature=_chamber_temperature(report, model),
             speed_profile=(
                 None if speed_level is None else _SPEED_PROFILES.get(speed_level)

@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import ssl
 from typing import TYPE_CHECKING, Any
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
+import aiomqtt
 import pytest
 
 from aiobambulab import (
@@ -70,8 +71,9 @@ async def test_connect(printer: FakePrinter, client: BambuLabClient) -> None:
     assert client.available
     assert client.info.model is PrinterModel.P1S
     assert client.info.firmware_version == "01.08.02.00"
-    assert client.state.print_state is PrintState.RUNNING
+    assert client.state.print_state is PrintState.PRINTING
     assert client.state.progress == 42
+    assert client.error is None
     # A P1S has no chamber sensor, so the model has to be known.
     assert client.state.chamber_temperature is None
     assert printer.requests == [
@@ -158,7 +160,7 @@ async def test_update(printer: FakePrinter, client: BambuLabClient) -> None:
     assert client.state.current_layer == 97
     # What did not change is still known.
     assert client.state.total_layers == 240
-    assert client.state.print_state is PrintState.RUNNING
+    assert client.state.print_state is PrintState.PRINTING
     listener.assert_called_once_with()
 
     remove_listener()
@@ -177,10 +179,10 @@ async def test_update_of_a_nested_value(
     printer.version = load_fixture("h2d_version.json")
     printer.status = load_fixture("h2d_status.json")
     await client.connect()
-    assert client.state.chamber_temperature == 35.0
+    assert client.state.chamber_temperature == 35
 
     printer.push(status(device={"ctc": {"info": {"temp": 2293796}}}))
-    await wait_for(lambda: client.state.chamber_temperature == 36.0)
+    await wait_for(lambda: client.state.chamber_temperature == 36)
 
     # The rest of the object is still known.
     assert client._report["device"]["ctc"]["state"] == 0
@@ -253,6 +255,25 @@ async def test_ignored_messages(
     listener.assert_called_once_with()
     assert client.info == info
     assert client.state.print_state is state.print_state
+
+
+async def test_values_that_are_not_numbers(
+    printer: FakePrinter, client: BambuLabClient
+) -> None:
+    """A number that is not one is not known, and does not stop the client."""
+    await client.connect()
+    assert client.state.bed_temperature == 60
+    assert client.state.current_layer == 96
+
+    printer.push(
+        b'{"print": {"command": "push_status", "msg": 1, "bed_temper": NaN,'
+        b' "layer_num": 1e999, "mc_percent": 43}}'
+    )
+    await wait_for(lambda: client.state.progress == 43)
+
+    assert client.available
+    assert client.state.bed_temperature is None
+    assert client.state.current_layer is None
 
 
 async def test_failing_listener(
@@ -328,6 +349,7 @@ async def test_wrong_access_code(
         await client.connect()
 
     assert not client.available
+    assert isinstance(client.error, BambuLabAuthenticationError)
     assert printer.requests == []
 
 
@@ -568,33 +590,110 @@ async def test_unexpected_error_while_connecting(
         await client.connect()
 
     assert not client.available
-    await wait_for(lambda: "Unexpected error in the connection" in caplog.text)
+    assert f"Unexpected error in the connection to printer {SERIAL}" in caplog.text
 
 
 async def test_unexpected_error_while_connected(
-    printer: FakePrinter,
-    client: BambuLabClient,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+    printer: FakePrinter, client: BambuLabClient, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A bug does not leave a printer that looks available but is not followed."""
+    """A bug does not stop the client for good: it reports it, and tries again."""
     await client.connect()
     listener = Mock()
     client.add_listener(listener)
-    monkeypatch.setattr(
+
+    with patch(
         "aiobambulab.client.PrinterState.from_report",
-        Mock(side_effect=RuntimeError("Boom")),
-    )
+        side_effect=RuntimeError("Boom"),
+    ):
+        printer.push(status(mc_percent=43))
+        await wait_for(lambda: not client.available)
 
-    printer.push(status(mc_percent=43))
-    await wait_for(lambda: not client.available)
-
-    listener.assert_called_once_with()
     assert f"Unexpected error in the connection to printer {SERIAL}" in caplog.text
-    await wait_for(lambda: not printer._clients)
+    assert type(client.error) is BambuLabError
 
-    # The client can connect again.
-    monkeypatch.undo()
+    await wait_for(lambda: client.available)
+
+    assert client.error is None
+    assert listener.call_count == 2
+
+
+async def test_error_while_reconnecting(
+    printer: FakePrinter, client: BambuLabClient
+) -> None:
+    """The client tells why the printer is not available, and keeps trying."""
     await client.connect()
 
+    printer.access_code = "87654321"
+    await printer.drop_clients()
+    await wait_for(lambda: isinstance(client.error, BambuLabAuthenticationError))
+
+    assert not client.available
+    attempts = printer.connections
+    await wait_for(lambda: printer.connections > attempts)
+
+    printer.access_code = ACCESS_CODE
+    await wait_for(lambda: client.available)
+
+    assert client.error is None
+
+
+async def test_concurrent_connect(printer: FakePrinter, client: BambuLabClient) -> None:
+    """Connecting twice at the same time connects once, and both wait for it."""
+    await asyncio.gather(client.connect(), client.connect())
+
     assert client.available
+    assert printer.connections == 1
+
+
+@pytest.mark.parametrize("host", ["", "printer..local"])
+async def test_invalid_host(ssl_context: ssl.SSLContext, host: str) -> None:
+    """A host that cannot be connected to is like a printer that is not there."""
+    client = BambuLabClient(host, SERIAL, ACCESS_CODE, ssl_context=ssl_context)
+
+    with pytest.raises(BambuLabConnectionError):
+        await client.connect()
+
+    assert not client.available
+
+
+async def test_disconnect_while_connecting(
+    printer: FakePrinter, client: BambuLabClient
+) -> None:
+    """Disconnecting ends a connect that is still waiting for the printer."""
+    printer.status = None
+    connect = asyncio.create_task(client.connect())
+    await wait_for(lambda: len(printer.requests) == 2)
+
+    await client.disconnect()
+
+    with pytest.raises(BambuLabError, match="Disconnected while connecting"):
+        await connect
+
+
+async def test_disconnect_when_closing_the_connection_fails(
+    client: BambuLabClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Disconnecting ends the client, also when the printer does not let go."""
+    listening = asyncio.Event()
+    attempts = 0
+
+    async def listen() -> None:
+        nonlocal attempts
+        attempts += 1
+        listening.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # What the MQTT client does when the printer does not answer.
+            raise aiomqtt.MqttError from None
+
+    monkeypatch.setattr(client, "_listen", listen)
+    connect = asyncio.create_task(client.connect())
+    await listening.wait()
+
+    async with asyncio.timeout(1):
+        await client.disconnect()
+
+    with pytest.raises(BambuLabError):
+        await connect
+    assert attempts == 1

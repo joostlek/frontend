@@ -62,6 +62,8 @@ def create_ssl_context(serial: str) -> ssl.SSLContext:
     """
     context = PrinterSSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.serial = serial
+    # The serial number is the common name of the certificate.
+    context.hostname_checks_common_name = True
     context.load_verify_locations(cafile=CA_FILE)
     # Some printer firmware is reported to never answer a TLS 1.3 handshake.
     context.maximum_version = ssl.TLSVersion.TLSv1_2

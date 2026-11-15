@@ -56,8 +56,9 @@ asyncio.run(main())
 `connect()`, which the context manager calls, returns once the client knows which printer it is and what its state is. From then on:
 
 - `client.info` is what the printer is: its model, firmware version, and hardware version.
-- `client.state` is what the printer is doing. A value is `None` when the printer does not report it.
+- `client.state` is what the printer is doing. A value is `None` when the printer does not report it. Temperatures are in whole degrees Celsius, like the printer shows them.
 - `client.available` is `False` while the connection is lost. The client keeps trying to connect again, and `client.state` keeps the last known state.
+- `client.error` is why the printer is not available, if that is known. The client keeps trying whatever the error is. An error like a rejected access code does not go away by itself, so act on it.
 - Listeners are called when the state, the info, or the availability changes.
 
 ### Errors

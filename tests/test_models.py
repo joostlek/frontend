@@ -37,11 +37,11 @@ def test_state_of_an_idle_printer() -> None:
         remaining_minutes=0,
         current_layer=0,
         total_layers=0,
-        nozzle_temperature=25.0,
-        nozzle_target_temperature=0.0,
-        bed_temperature=24.0,
-        bed_target_temperature=0.0,
-        chamber_temperature=26.0,
+        nozzle_temperature=25,
+        nozzle_target_temperature=0,
+        bed_temperature=24,
+        bed_target_temperature=0,
+        chamber_temperature=26,
         speed_profile=SpeedProfile.STANDARD,
         chamber_light_on=True,
         wifi_signal=-45,
@@ -53,16 +53,17 @@ def test_state_of_a_printer_without_chamber_sensor() -> None:
     assert PrinterState.from_report(
         _report("p1s_status.json"), PrinterModel.P1S
     ) == PrinterState(
-        print_state=PrintState.RUNNING,
+        print_state=PrintState.PRINTING,
         job_name="Benchy",
         progress=42,
         remaining_minutes=73,
         current_layer=96,
         total_layers=240,
-        nozzle_temperature=219.90625,
-        nozzle_target_temperature=220.0,
-        bed_temperature=59.6875,
-        bed_target_temperature=60.0,
+        # The printer reports 219.90625 and 59.6875.
+        nozzle_temperature=220,
+        nozzle_target_temperature=220,
+        bed_temperature=60,
+        bed_target_temperature=60,
         chamber_temperature=None,
         speed_profile=SpeedProfile.SPORT,
         chamber_light_on=False,
@@ -74,9 +75,9 @@ def test_state_of_a_printer_that_reports_the_chamber_as_a_device() -> None:
     """Newer firmware packs the chamber temperature and its target together."""
     state = PrinterState.from_report(_report("h2d_status.json"), PrinterModel.H2D)
 
-    assert state.print_state is PrintState.PAUSE
-    assert state.chamber_temperature == 35.0
-    assert state.nozzle_temperature == 245.0
+    assert state.print_state is PrintState.PAUSED
+    assert state.chamber_temperature == 35
+    assert state.nozzle_temperature == 245
     assert state.chamber_light_on is True
 
 
@@ -84,7 +85,7 @@ def test_state_without_a_known_model_keeps_the_chamber_temperature() -> None:
     """Only a known model is known to have no chamber sensor."""
     state = PrinterState.from_report(_report("p1s_status.json"))
 
-    assert state.chamber_temperature == 5.0
+    assert state.chamber_temperature == 5
 
 
 def test_state_of_an_empty_report() -> None:
@@ -96,11 +97,16 @@ def test_state_of_an_empty_report() -> None:
     "report",
     [
         {"gcode_state": "DANCING"},
+        {"gcode_state": "OFFLINE"},
         {"gcode_state": None},
         {"subtask_name": 5},
         {"subtask_name": "   "},
         {"mc_percent": "many"},
         {"mc_percent": True},
+        {"mc_percent": float("nan")},
+        {"mc_percent": "nan"},
+        {"mc_remaining_time": float("inf")},
+        {"nozzle_temper": float("-inf")},
         {"mc_remaining_time": None},
         {"nozzle_temper": [1]},
         {"spd_lvl": 9},
@@ -126,8 +132,9 @@ def test_state_ignores_values_it_does_not_understand(report: dict[str, Any]) -> 
         ({"mc_percent": "37"}, PrinterState(progress=37)),
         ({"mc_percent": 37.9}, PrinterState(progress=37)),
         ({"wifi_signal": -61}, PrinterState(wifi_signal=-61)),
-        ({"bed_temper": "60.5"}, PrinterState(bed_temperature=60.5)),
-        ({"gcode_state": "finish"}, PrinterState(print_state=PrintState.FINISH)),
+        ({"bed_temper": "60.6"}, PrinterState(bed_temperature=61)),
+        ({"bed_temper": 59.4}, PrinterState(bed_temperature=59)),
+        ({"gcode_state": "finish"}, PrinterState(print_state=PrintState.FINISHED)),
         (
             {"lights_report": [{"node": "chamber_light", "mode": "flashing"}]},
             PrinterState(chamber_light_on=True),
@@ -235,3 +242,21 @@ def test_info_tells_the_model_from_the_product_name(
 def test_info_without_usable_modules(modules: Any) -> None:
     """Nothing is known about a printer that reports no usable modules."""
     assert PrinterInfo.from_modules(SERIAL, modules) == PrinterInfo(serial=SERIAL)
+
+
+@pytest.mark.parametrize(
+    ("reported", "state"),
+    [
+        ("IDLE", PrintState.IDLE),
+        ("INIT", PrintState.INITIALIZING),
+        ("SLICING", PrintState.SLICING),
+        ("PREPARE", PrintState.PREPARING),
+        ("RUNNING", PrintState.PRINTING),
+        ("PAUSE", PrintState.PAUSED),
+        ("FINISH", PrintState.FINISHED),
+        ("FAILED", PrintState.FAILED),
+    ],
+)
+def test_print_states(reported: str, state: PrintState) -> None:
+    """Every state of a print job has a name that says what it is."""
+    assert PrinterState.from_report({"gcode_state": reported}).print_state is state
