@@ -1,0 +1,28 @@
+{
+  "info": {
+    "command": "get_version",
+    "sequence_id": "1",
+    "module": [
+      {
+        "name": "ota",
+        "sw_ver": "01.01.01.00",
+        "hw_ver": "N/A",
+        "loader_ver": "00.00.00.00",
+        "sn": "09400A000000001",
+        "product_name": "Bambu Lab H2D",
+        "visible": true,
+        "flag": 3
+      },
+      {
+        "name": "n3f/0",
+        "sw_ver": "02.00.19.47",
+        "hw_ver": "N3F05",
+        "loader_ver": "00.00.00.00",
+        "sn": "19C00A000000001",
+        "product_name": "AMS 2 Pro (1)",
+        "visible": true,
+        "flag": 0
+      }
+    ]
+  }
+}

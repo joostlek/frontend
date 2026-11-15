@@ -1,0 +1,104 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aiobambulab"
+version = "0.1.0"
+description = "Asynchronous Python client for Bambu Lab 3D printers on the local network"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.13"
+authors = [{ name = "Joost Lekkerkerker" }]
+keywords = ["bambu lab", "bambulab", "3d printer", "mqtt", "asyncio"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Framework :: AsyncIO",
+  "Intended Audience :: Developers",
+  "Natural Language :: English",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Home Automation",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
+dependencies = ["aiomqtt>=2.5.0"]
+
+[project.urls]
+Homepage = "https://github.com/joostlek/aiobambulab"
+Repository = "https://github.com/joostlek/aiobambulab"
+Issues = "https://github.com/joostlek/aiobambulab/issues"
+Changelog = "https://github.com/joostlek/aiobambulab/releases"
+
+[dependency-groups]
+dev = [
+  "cryptography>=44.0.0",
+  "mypy>=1.15.0",
+  "pytest>=8.3.0",
+  "pytest-asyncio>=1.0.0",
+  "pytest-cov>=6.0.0",
+  "ruff>=0.11.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aiobambulab"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/tests", "/examples", "/README.md", "/LICENSE"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "--cov=aiobambulab --cov-report=term-missing"
+
+[tool.coverage.run]
+branch = true
+source = ["aiobambulab"]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+exclude_also = ["if TYPE_CHECKING:"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unreachable = true
+files = ["src", "tests", "examples"]
+
+[[tool.mypy.overrides]]
+# mypy narrows a property after an assert, also when the test changes it later.
+module = "tests.*"
+warn_unreachable = false
+
+[tool.ruff]
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "ANN401", # The messages of a printer are untyped JSON
+  "COM812", # Conflicts with the formatter
+  "CPY001", # No copyright notice in every file
+  "D203", # Conflicts with D211
+  "D213", # Conflicts with D212
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+  "ASYNC110", # Tests poll for what the client does in the background
+  "PLR2004", # Magic values are fine in tests
+  "S101", # Asserts are the point of tests
+  "SLF001", # Tests may look at private members
+]
+"examples/**" = [
+  "INP001", # Examples are scripts, not a package
+  "T201", # Examples print
+]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+force-sort-within-sections = true
+known-first-party = ["aiobambulab"]
