@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import ssl
 from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock, patch
 
@@ -21,13 +20,19 @@ from aiobambulab import (
     PrintState,
     SpeedProfile,
 )
-from aiobambulab.tls import PrinterSSLContext
 
-from .conftest import ACCESS_CODE, SERIAL, CertificateAuthority, load_fixture
+from .conftest import (
+    ACCESS_CODE,
+    SERIAL,
+    CertificateAuthority,
+    client_ssl_context,
+    load_fixture,
+)
 from .fake_printer import CONNACK_BAD_CREDENTIALS, CONNACK_NOT_AUTHORIZED, FakePrinter
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    import ssl
 
 
 async def wait_for(condition: Callable[[], bool]) -> None:
@@ -371,15 +376,12 @@ async def test_refused_for_another_reason(
 
 async def test_wrong_serial(printer: FakePrinter, ca: CertificateAuthority) -> None:
     """The client does not send the access code to another printer."""
-    context = PrinterSSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    context.serial = "01P00A999999999"
-    context.load_verify_locations(cafile=ca.path)
     client = BambuLabClient(
         "127.0.0.1",
         "01P00A999999999",
         ACCESS_CODE,
         port=printer.port,
-        ssl_context=context,
+        ssl_context=client_ssl_context(ca, "01P00A999999999"),
     )
 
     with pytest.raises(BambuLabSerialMismatchError):

@@ -54,6 +54,17 @@ _PRODUCT_NAME_PREFIX: Final = "Bambu Lab "
 # Product names that differ from the name of the model.
 _MODEL_ALIASES: Final = {"X1-Carbon": PrinterModel.X1C}
 
+# These models have no video stream: they send images of their camera.
+MODELS_WITH_CAMERA_IMAGES: Final = frozenset(
+    {
+        PrinterModel.A1,
+        PrinterModel.A1_MINI,
+        PrinterModel.A2L,
+        PrinterModel.P1P,
+        PrinterModel.P1S,
+    }
+)
+
 # These models report a chamber temperature, but have no sensor to measure it.
 _MODELS_WITHOUT_CHAMBER_SENSOR: Final = frozenset(
     {
@@ -235,6 +246,15 @@ def _accepts_commands(report: dict[str, Any]) -> bool:
     return flag3 is None or not flag3 & _FLAG3_AUTHORIZATION_CONTROL
 
 
+def _camera_stream_enabled(report: dict[str, Any]) -> bool | None:
+    """Return whether the printer serves its video stream on the network."""
+    ipcam = report.get("ipcam")
+    if not isinstance(ipcam, dict) or "rtsp_url" not in ipcam:
+        return None
+    # The printer reports where the stream is, or that it is disabled.
+    return str(ipcam["rtsp_url"]).startswith(("rtsp://", "rtsps://"))
+
+
 def _print_state(report: dict[str, Any]) -> PrintState | None:
     """Return the state of the print job."""
     return _PRINT_STATES.get(str(report.get("gcode_state")).upper())
@@ -258,6 +278,10 @@ class PrinterState:
     Newer firmware only accepts commands when the printer is in developer
     mode. `accepts_commands` tells whether it does. The chamber light is the
     exception: a printer always accepts the command for it.
+
+    `camera_stream_enabled` is None for a printer without a video stream. A
+    printer that has one only serves it on the network when that is turned on
+    on the printer.
     """
 
     print_state: PrintState | None = None
@@ -275,6 +299,7 @@ class PrinterState:
     chamber_light_on: bool | None = None
     wifi_signal: int | None = None
     accepts_commands: bool = True
+    camera_stream_enabled: bool | None = None
 
     @classmethod
     def from_report(
@@ -303,4 +328,5 @@ class PrinterState:
             chamber_light_on=_chamber_light_on(report),
             wifi_signal=_wifi_signal(report),
             accepts_commands=_accepts_commands(report),
+            camera_stream_enabled=_camera_stream_enabled(report),
         )

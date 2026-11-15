@@ -10,6 +10,7 @@ The client connects to the MQTT server that every Bambu Lab printer runs, and fo
 - Verifies that it talks to your printer: it only accepts a certificate that Bambu Lab issued to the serial number you pass in.
 - Connects again by itself when the connection is lost.
 - Sends the basic commands: pause, resume, or stop a print, set the speed profile, and switch the light.
+- Gives you the camera: images for the printers that send images, and the address of the video stream for the printers that have one.
 
 ## Installation
 
@@ -75,6 +76,28 @@ await client.set_speed_profile(SpeedProfile.SILENT)
 A command raises `BambuLabConnectionError` when the printer is not connected. The printer does not confirm a command in a way to rely on: what it did shows in the state it reports afterwards.
 
 Newer firmware only accepts commands when the printer is in developer mode. `client.state.accepts_commands` tells whether it does. The light is the exception: the printer always accepts the command for it.
+
+### Camera
+
+Printers have one of two kinds of camera access, depending on the model.
+
+The A1 and P1 series, and the A2L, send images:
+
+```python
+if client.supports_camera_images:
+    image = await client.camera_image()  # A JPEG image
+```
+
+The first image takes a moment, because the connection to the camera only opens when you ask for an image. It stays open while you keep asking, so the next images come right away. It closes when you stop asking for 30 seconds, and on `disconnect()`.
+
+The other printers serve a video stream, when that is turned on on the printer:
+
+```python
+if (url := client.camera_stream_url) is not None:
+    ...  # An rtsps:// address for a video player. It holds the access code.
+```
+
+`client.state.camera_stream_enabled` is `None` for a printer without a video stream, and `False` when the stream is turned off on the printer.
 
 ### Errors
 

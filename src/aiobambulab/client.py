@@ -9,11 +9,13 @@ import logging
 import secrets
 import ssl
 from typing import TYPE_CHECKING, Any, Self
+from urllib.parse import quote
 
 import aiomqtt
 from aiomqtt.exceptions import MqttConnectError
 from paho.mqtt.reasoncodes import ReasonCode
 
+from .camera import CameraImages
 from .const import (
     DEFAULT_PORT,
     DEFAULT_TIMEOUT,
@@ -21,6 +23,8 @@ from .const import (
     MQTT_USERNAME,
     RECONNECT_MAX_DELAY,
     RECONNECT_MIN_DELAY,
+    STREAM_PATH,
+    STREAM_PORT,
 )
 from .exceptions import (
     BambuLabAuthenticationError,
@@ -29,7 +33,13 @@ from .exceptions import (
     BambuLabError,
     BambuLabSerialMismatchError,
 )
-from .models import SPEED_PROFILES, PrinterInfo, PrinterState, SpeedProfile
+from .models import (
+    MODELS_WITH_CAMERA_IMAGES,
+    SPEED_PROFILES,
+    PrinterInfo,
+    PrinterState,
+    SpeedProfile,
+)
 from .tls import VERIFY_CODE_HOSTNAME_MISMATCH, create_ssl_context
 
 if TYPE_CHECKING:
@@ -113,6 +123,10 @@ class BambuLabClient:
         self._available = False
         self._listeners: list[Callable[[], None]] = []
 
+        self._camera = CameraImages(
+            host, self._serial, access_code, self._get_ssl_context, timeout
+        )
+
         self._task: asyncio.Task[None] | None = None
         self._mqtt: aiomqtt.Client | None = None
         self._connect_lock = asyncio.Lock()
@@ -153,6 +167,44 @@ class BambuLabClient:
         """Return the last known state of the printer."""
         return self._state
 
+    @property
+    def supports_camera_images(self) -> bool:
+        """Return whether `camera_image` works for this printer.
+
+        Printers without a video stream send images of their camera.
+        """
+        return self._info.model in MODELS_WITH_CAMERA_IMAGES
+
+    @property
+    def camera_stream_url(self) -> str | None:
+        """Return the address of the video stream of the printer, if it serves one.
+
+        The address holds the access code. The stream uses RTSP over TLS, with
+        the certificate of the printer.
+        """
+        if not self._state.camera_stream_enabled:
+            return None
+        host = f"[{self._host}]" if ":" in self._host else self._host
+        access_code = quote(self._access_code, safe="")
+        return (
+            f"rtsps://{MQTT_USERNAME}:{access_code}@{host}:{STREAM_PORT}{STREAM_PATH}"
+        )
+
+    async def camera_image(self) -> bytes:
+        """Return the most recent image of the camera, as a JPEG.
+
+        Only for a printer with `supports_camera_images`. The first image
+        takes a moment: the connection to the camera only opens when an image
+        is asked for, and closes again when that stops.
+
+        Raises:
+            BambuLabConnectionError: The camera could not be reached, or the
+                printer closed the connection. It also does that for a wrong
+                access code.
+
+        """
+        return await self._camera.image()
+
     def add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
         """Call the listener when the state or availability of the printer changes.
 
@@ -183,10 +235,7 @@ class BambuLabClient:
             if self._task is not None:
                 return
             loop = asyncio.get_running_loop()
-            if self._ssl_context is None:
-                self._ssl_context = await loop.run_in_executor(
-                    None, create_ssl_context, self._serial
-                )
+            await self._get_ssl_context()
             self._first_attempt.clear()
             self._error = None
             self._task = loop.create_task(
@@ -206,6 +255,14 @@ class BambuLabClient:
             await self.disconnect()
             raise error or BambuLabError("Disconnected while connecting")
 
+    async def _get_ssl_context(self) -> ssl.SSLContext:
+        """Return the TLS context for the printer, and create it when needed."""
+        if self._ssl_context is None:
+            self._ssl_context = await asyncio.get_running_loop().run_in_executor(
+                None, create_ssl_context, self._serial
+            )
+        return self._ssl_context
+
     def _timeout_error(self) -> BambuLabConnectionError:
         """Return the error for a printer that did not get available in time."""
         if self._has_info:
@@ -220,6 +277,7 @@ class BambuLabClient:
 
     async def disconnect(self) -> None:
         """Disconnect from the printer."""
+        await self._camera.close()
         if (task := self._task) is None:
             return
         self._task = None

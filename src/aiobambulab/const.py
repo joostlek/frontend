@@ -11,5 +11,14 @@ DEFAULT_TIMEOUT: Final = 15.0
 MQTT_USERNAME: Final = "bblp"
 MQTT_KEEPALIVE: Final = 60
 
+# Printers without a video stream send images of their camera on this port.
+CAMERA_PORT: Final = 6000
+# How long the connection to the camera stays open after the last request.
+CAMERA_IDLE_TIMEOUT: Final = 30.0
+
+# Printers with a video stream serve it here.
+STREAM_PORT: Final = 322
+STREAM_PATH: Final = "/streaming/live/1"
+
 RECONNECT_MIN_DELAY: Final = 1.0
 RECONNECT_MAX_DELAY: Final = 60.0

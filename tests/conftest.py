@@ -120,13 +120,18 @@ def printer_ssl_context(ca: CertificateAuthority) -> ssl.SSLContext:
     return ca.issue(SERIAL)
 
 
+def client_ssl_context(ca: CertificateAuthority, serial: str) -> ssl.SSLContext:
+    """Return a TLS context for a printer, which trusts a test authority."""
+    context = PrinterSSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.serial = serial
+    context.load_verify_locations(cafile=ca.path)
+    return context
+
+
 @pytest.fixture
 def ssl_context(ca: CertificateAuthority) -> ssl.SSLContext:
     """Return the TLS context of the client, which trusts the test authority."""
-    context = PrinterSSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    context.serial = SERIAL
-    context.load_verify_locations(cafile=ca.path)
-    return context
+    return client_ssl_context(ca, SERIAL)
 
 
 @pytest.fixture
